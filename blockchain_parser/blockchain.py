@@ -14,7 +14,6 @@ import mmap
 import struct
 import pickle
 import stat
-import plyvel
 
 from .block import Block
 from .index import DBBlockIndex
@@ -91,20 +90,6 @@ class Blockchain(object):
             for raw_block in get_blocks(blk_file):
                 yield Block(raw_block)
 
-    def __getBlockIndexes(self, index):
-        """There is no method of leveldb to close the db (and release the lock).
-        This creates problem during concurrent operations.
-        This function also provides caching of indexes.
-        """
-        if self.indexPath != index:
-            db = plyvel.DB(index, compression=None)
-            self.blockIndexes = [DBBlockIndex(format_hash(k[1:]), v)
-                                 for k, v in db.iterator() if k[0] == ord('b')]
-            db.close()
-            self.blockIndexes.sort(key=lambda x: x.height)
-            self.indexPath = index
-        return self.blockIndexes
-
     def _index_confirmed(self, chain_indexes, num_confirmations=6):
         """Check if the first block index in "chain_indexes" has at least
         "num_confirmation" (6) blocks built on top of it.
@@ -148,74 +133,3 @@ class Blockchain(object):
                         return True
                     else:
                         return False
-
-    def get_ordered_blocks(self, index, start=0, end=None, cache=None):
-        """Yields the blocks contained in the .blk files as per
-        the heigt extract from the leveldb index present at path
-        index maintained by bitcoind.
-        """
-
-        blockIndexes = None
-
-        if cache and os.path.exists(cache):
-            # load the block index cache from a previous index
-            with open(cache, 'rb') as f:
-                blockIndexes = pickle.load(f)
-
-        if blockIndexes is None:
-            # build the block index
-            blockIndexes = self.__getBlockIndexes(index)
-            if cache and not os.path.exists(cache):
-                # cache the block index for re-use next time
-                with open(cache, 'wb') as f:
-                    pickle.dump(blockIndexes, f)
-
-        # remove small forks that may have occured while the node was live.
-        # Occassionally a node will receive two different solutions to a block
-        # at the same time. The Leveldb index saves both, not pruning the
-        # block that leads to a shorter chain once the fork is settled without
-        # "-reindex"ing the bitcoind block data. This leads to at least two
-        # blocks with the same height in the database.
-        # We throw out blocks that don't have at least 6 other blocks on top of
-        # it (6 confirmations).
-        orphans = []  # hold blocks that are orphans with < 6 blocks on top
-        last_height = -1
-        for i, blockIdx in enumerate(blockIndexes):
-            if last_height > -1:
-                # if this block is the same height as the last block an orphan
-                # occurred, now we have to figure out which of the two to keep
-                if blockIdx.height == last_height:
-
-                    # loop through future blocks until we find a chain 6 blocks
-                    # long that includes this block. If we can't find one
-                    # remove this block as it is invalid
-                    if self._index_confirmed(blockIndexes[i:]):
-
-                        # if this block is confirmed, the unconfirmed block is
-                        # the previous one. Remove it.
-                        orphans.append(blockIndexes[i - 1].hash)
-                    else:
-
-                        # if this block isn't confirmed, remove it.
-                        orphans.append(blockIndexes[i].hash)
-
-            last_height = blockIdx.height
-
-        # filter out the orphan blocks, so we are left only with block indexes
-        # that have been confirmed
-        # (or are new enough that they haven't yet been confirmed)
-        blockIndexes = list(filter(lambda block: block.hash not in orphans, blockIndexes))
-
-        if end is None:
-            end = len(blockIndexes)
-
-        if end < start:
-            blockIndexes = list(reversed(blockIndexes))
-            start = len(blockIndexes) - start
-            end = len(blockIndexes) - end
-
-        for blkIdx in blockIndexes[start:end]:
-            if blkIdx.file == -1 or blkIdx.data_pos == -1:
-                break
-            blkFile = os.path.join(self.path, "blk%05d.dat" % blkIdx.file)
-            yield Block(get_block(blkFile, blkIdx.data_pos), blkIdx.height)
