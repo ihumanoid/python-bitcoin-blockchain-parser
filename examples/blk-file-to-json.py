@@ -14,6 +14,7 @@ blk_file = sys.argv[1]
 output_json_file = sys.argv[2]
 
 with open(output_json_file, "w") as file:
+    transaction_counter = 0
     for raw_block in get_blocks(blk_file):
         block = Block(raw_block)
 
@@ -54,3 +55,6 @@ with open(output_json_file, "w") as file:
             json.dump(json_transaction, file)
             file.write(os.linesep)
 
+            transaction_counter = transaction_counter + 1
+            if (transaction_counter % 10000) == 0:
+                print("Transactions processed:", transaction_counter)
